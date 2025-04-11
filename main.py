@@ -1,264 +1,169 @@
-import nextcord, datetime, json, re, httpx, certifi
+import nextcord, json, requests, re, certifi
 from nextcord.ext import commands
+import cloudscraper
+import logging
 
-config = json.load(open('./config.json', 'r', encoding='utf-8'))
 
-bot = commands.Bot(
-    command_prefix='nyx!',
-    help_command=None,
-    intents=nextcord.Intents.all(),
-    strip_after_prefix=True,
-    case_insensitive=True
-)
+bot, config = commands.Bot(command_prefix='flexzy!',help_command=None,intents=nextcord.Intents.all()), json.load(open('./config.json', 'r', encoding='utf-8'))
 
-class topupModal(nextcord.ui.Modal):
 
+class TopupModal(nextcord.ui.Modal):
     def __init__(self):
-        super().__init__(title='เติมเงิน', timeout=None, custom_id='topup-modal')
-        self.link = nextcord.ui.TextInput(
-            label = 'ลิ้งค์ซองอังเปา',
-            placeholder = 'https://gift.truemoney.com/campaign/?v=xxxxxxxxxxxxxxx',
-            style = nextcord.TextInputStyle.short,
-            required = True
+        super().__init__(title='กรอกลิ้งค์อั่งเปาของท่าน')
+        self.a = nextcord.ui.TextInput(
+            label='ลิ้งค์ซองอังเปา',
+            placeholder='https://gift.truemoney.com/campaign/?v=xxxxxxxxxxxxxxx',
+            style=nextcord.TextInputStyle.short,
+            required=True
         )
-        self.add_item(self.link)
+        self.add_item(self.a)
 
     async def callback(self, interaction: nextcord.Interaction):
-        link = str(self.link.value).replace(' ', '')
-        message = await interaction.response.send_message(content='checking.', ephemeral=True)
-        if re.match(r'https:\/\/gift\.truemoney\.com\/campaign\/\?v=+[a-zA-Z0-9]{18}', link):
-            voucher_hash = link.split('?v=')[1]
-            response = httpx.post(
-                url = f'https://gift.truemoney.com/campaign/vouchers/{voucher_hash}/redeem',
-                headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/8a0.0.3987.149 Safari/537.36'
-                },
-                json = {
-                    'mobile': config['phoneNumber'],
-                    'voucher_hash': f'{voucher_hash}'
-                },
-                verify=certifi.where(),
-            )
-            if (response.status_code == 200 and response.json()['status']['code'] == 'SUCCESS'):
-                data = response.json()
-                amount = int(float(data['data']['my_ticket']['amount_baht']))
-                userJSON = json.load(open('./database/users.json', 'r', encoding='utf-8'))
-                if (str(interaction.user.id) not in userJSON):
-                    userJSON[str(interaction.user.id)] = {
-                        "userId": interaction.user.id,
-                        "point": amount,
-                        "all-point": amount,
-                        "transaction": [
-                            {
+        link = str(self.a.value).strip()
+        if re.match(r'https:\/\/gift\.truemoney\.com\/campaign\/\?v=[a-zA-Z0-9]{18}', link):
+            logging.info(f'URL {link} DISCORD-ID {interaction.user.id}')
+
+            if 'phone' not in config:
+                embed = nextcord.Embed(description='เกิดข้อผิดพลาดในการตั้งค่า: หมายเลขโทรศัพท์ไม่ถูกต้อง', color=nextcord.Color.red())
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
+            voucher_code = link.split("?v=")[1]
+            verification_url = f"https://gift.truemoney.com/campaign/vouchers/{voucher_code}/verify?mobile={config['phone']}"
+            redeem_url = f"https://gift.truemoney.com/campaign/vouchers/{voucher_code}/redeem"
+
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'TE': 'Trailers'
+            }
+
+            try:
+                scraper = cloudscraper.create_scraper()
+
+                verify_response = scraper.get(verification_url, headers=headers)
+                logging.info(f'Verify Response Content: {verify_response.text}')
+
+                if verify_response.status_code == 200:
+                    data = verify_response.json()
+                    voucher_status = data.get("data", {}).get("voucher", {}).get("status")
+
+                    if voucher_status == "active":
+                        redeem_response = scraper.post(redeem_url, json={"mobile": config['phone']}, headers=headers)
+                        logging.info(f'Redeem Response Content: {redeem_response.text}')
+                        redeem_data = redeem_response.json()
+
+                        if redeem_response.status_code == 200 and redeem_data.get("status", {}).get("code") == "SUCCESS":
+                            amount = float(redeem_data["data"]["my_ticket"]["amount_baht"])
+
+                            try:
+                                with open("./database/users.json", "r", encoding="utf-8") as file:
+                                    userJSON = json.load(file)
+                            except (FileNotFoundError, json.JSONDecodeError) as e:
+                                embed = nextcord.Embed(description='เกิดข้อผิดพลาดในการอ่านข้อมูลผู้ใช้', color=nextcord.Color.red())
+                                await interaction.response.send_message(embed=embed, ephemeral=True)
+                                return
+
+                            user_data = userJSON.get(str(interaction.user.id), {"point": 0, "all-point": 0, "transaction": []})
+                            user_data["point"] += amount
+                            user_data["all-point"] += amount
+                            user_data["transaction"].append({
                                 "topup": {
                                     "url": link,
                                     "amount": amount,
-                                    "time": str(datetime.datetime.now())
+                                    "time": str(datetime.now()),
                                 }
-                            }
-                        ]
-                    }
+                            })
+                            userJSON[str(interaction.user.id)] = user_data
+
+                            try:
+                                with open("./database/users.json", "w", encoding="utf-8") as file:
+                                    json.dump(userJSON, file, indent=4, ensure_ascii=False)
+                            except IOError as e:
+                                embed = nextcord.Embed(description='เกิดข้อผิดพลาดในการบันทึกข้อมูลผู้ใช้', color=nextcord.Color.red())
+                                await interaction.response.send_message(embed=embed, ephemeral=True)
+                                return
+
+                            embed = nextcord.Embed(
+                                description=f'✅﹒**เติมเงินสำเร็จ**\nจำนวนเงิน: {amount} บาท',
+                                color=nextcord.Color.green()
+                            )
+                        elif redeem_response.status_code == 405:
+                            embed = nextcord.Embed(description='⚠﹒เกิดข้อผิดพลาดในการแลกซองอั่งเปา: Method Not Allowed', color=nextcord.Color.red())
+                        else:
+                            reason = redeem_data.get("status", {}).get("message", "Unknown error")
+                            embed = nextcord.Embed(description=f'❌﹒เกิดข้อผิดพลาดในการแลกซองอั่งเปา: {reason}', color=nextcord.Color.red())
+                    elif voucher_status == "redeemed":
+                        embed = nextcord.Embed(description='❌﹒ซองอั่งเปานี้ถูกใช้ไปแล้ว', color=nextcord.Color.red())
+                    elif voucher_status == "expired":
+                        embed = nextcord.Embed(description='❌﹒ซองอั่งเปานี้หมดอายุแล้ว', color=nextcord.Color.red())
+                    else:
+                        reason = data.get("status", {}).get("message", "Unknown error")
+                        embed = nextcord.Embed(description=f'❌﹒เกิดข้อผิดพลาด: {reason}', color=nextcord.Color.red())
+
+                elif verify_response.status_code == 403:
+                    embed = nextcord.Embed(description='❌﹒ซองอั่งเปานี้หมดอายุแล้วหรือถูกใช้ไปแล้ว', color=nextcord.Color.red())
                 else:
-                    userJSON[str(interaction.user.id)]['point'] += amount
-                    userJSON[str(interaction.user.id)]['all-point'] += amount
-                    userJSON[str(interaction.user.id)]['transaction'].append({
-                        "topup": {
-                            "url": link,
-                            "amount": amount,
-                            "time": str(datetime.datetime.now())
-                        }
-                    })
-                json.dump(userJSON, open('./database/users.json', 'w', encoding='utf-8'), indent=4, ensure_ascii=False)
-                embed = nextcord.Embed(description='✅﹒**เติมเงินสำเร็จ**', color=nextcord.Color.green())
-            else:
-                embed = nextcord.Embed(description='❌﹒**เติมเงินไม่สำเร็จ**', color=nextcord.Color.red())
+                    embed = nextcord.Embed(description='⚠﹒เกิดข้อผิดพลาดในการตรวจสอบซองอั่งเปา', color=nextcord.Color.red())
+
+            except Exception as e:
+                embed = nextcord.Embed(description=f'เกิดข้อผิดพลาดในการเชื่อมต่อ: {e}', color=nextcord.Color.red())
+                await interaction.response.send_message(embed=embed, ephemeral=True)
+                return
+
         else:
-            embed = nextcord.Embed(description='⚠﹒**รูปแบบลิ้งค์ไม่ถูกต้อง**', color=nextcord.Color.red())
-        await message.edit(content=None,embed=embed)
+            embed = nextcord.Embed(description='⚠﹒ลิ้งค์ที่ให้มาไม่ถูกต้อง', color=nextcord.Color.red())
 
-class sellroleView(nextcord.ui.View):
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    def __init__(self, message: nextcord.Message, value: str):
-        super().__init__(timeout=None)
-        self.message = message
-        self.value = value
-
-    @nextcord.ui.button(
-        label='✅﹒ยืนยัน',
-        custom_id='already',
-        style=nextcord.ButtonStyle.primary,
-        row=1
-    )
-    async def already(self, button: nextcord.Button, interaction: nextcord.Interaction):
-        roleJSON = json.load(open('./database/roles.json', 'r', encoding='utf-8'))
-        userJSON = json.load(open('./database/users.json', 'r', encoding='utf-8'))
-        if (str(interaction.user.id) not in userJSON):
-            embed = nextcord.Embed(description='🏦﹒เติมเงินเพื่อเปิดบัญชี', color=nextcord.Color.red())
-        else:
-            if (userJSON[str(interaction.user.id)]['point'] >= roleJSON[self.value]['price']):
-                userJSON[str(interaction.user.id)]['point'] -= roleJSON[self.value]['price']
-                userJSON[str(interaction.user.id)]['transaction'].append({
-                    "payment": {
-                        "roleId": self.value,
-                        "time": str(datetime.datetime.now())
-                    }
-                })
-                json.dump(userJSON, open('./database/users.json', 'w', encoding='utf-8'), indent=4, ensure_ascii=False)
-                if ('package' in self.value):
-                    for roleId in roleJSON[self.value]['roleIds']:
-                        try:
-                            await interaction.user.add_roles(nextcord.utils.get(interaction.user.guild.roles, id = roleId))
-                        except:
-                            pass
-                    channelLog = bot.get_channel(config['channelLog'])
-                    if (channelLog):
-                        embed = nextcord.Embed()
-                        embed.set_thumbnail(url=interaction.user.avatar.url)
-                        embed.title = '»»———　ประวัติการซื้อยศ　——-««<'
-                        embed.description = f'''
-                       ﹒𝐔𝐬𝐞𝐫 : **<@{interaction.user.id}>**
-                       ﹒𝐍𝐚𝐦𝐞 : **{interaction.user.name}**
-                       ﹒𝐏𝐫𝐢𝐜𝐞 : **{roleJSON[self.value]['price']}**𝐓𝐇𝐁
-                       ﹒𝐆𝐞𝐭𝐑𝐨𝐥𝐞 : <@&{roleJSON[self.value]["roleId"]}>
-                       »»———　GOOD PLACE　——-««<'''
-                        embed.color = nextcord.Color.blue()
-                        embed.set_footer(text='GOOD PLACE AUTO BUY ROLE', icon_url='https://media.discordapp.net/attachments/1248803700890144788/1261598898703568948/befa8c17-29e4-42ba-86a0-3fa1e0ebcabc.jpg?ex=66938b08&is=66923988&hm=d8688828ab4b0bbe3ff12745462ad884118e32ad78a16e3cb06add7217439f3d&=&format=webp&width=592&height=592')
-                        await channelLog.send(embed=embed)
-                    embed = nextcord.Embed(description=f'💲﹒ซื้อยศสำเร็จ ได้รับ <@&{roleJSON[self.value]["name"]}>', color=nextcord.Color.green())
-                else:
-                    channelLog = bot.get_channel(config['channelLog'])
-                    if (channelLog):
-                        embed = nextcord.Embed()
-                        embed.set_thumbnail(url=interaction.user.avatar.url)
-                        embed.title = '»»———　ประวัติการซื้อยศ　——-««<'
-                        embed.description = f'''
-                       ﹒𝐔𝐬𝐞𝐫 : **<@{interaction.user.id}>**
-                       ﹒𝐍𝐚𝐦𝐞 : **{interaction.user.name}**
-                       ﹒𝐏𝐫𝐢𝐜𝐞 : **{roleJSON[self.value]['price']}**𝐓𝐇𝐁
-                       ﹒𝐆𝐞𝐭𝐑𝐨𝐥𝐞 : <@&{roleJSON[self.value]["roleId"]}>
-                       »»———　GOOD PLACE　——-««<'''
-                        embed.color = nextcord.Color.blue()
-                        embed.set_footer(text='GOOD PLACE AUTO BUY ROLE', icon_url='https://media.discordapp.net/attachments/1248803700890144788/1261598898703568948/befa8c17-29e4-42ba-86a0-3fa1e0ebcabc.jpg?ex=66938b08&is=66923988&hm=d8688828ab4b0bbe3ff12745462ad884118e32ad78a16e3cb06add7217439f3d&=&format=webp&width=592&height=592')
-                        await channelLog.send(embed=embed)
-                    embed = nextcord.Embed(description=f'💲﹒ซื้อยศสำเร็จ ได้รับยศ <@&{roleJSON[self.value]["roleId"]}>', color=nextcord.Color.green())
-                    role = nextcord.utils.get(interaction.user.guild.roles, id = roleJSON[self.value]['roleId'])
-                    await interaction.user.add_roles(role)
-            else:
-                embed = nextcord.Embed(description=f'⚠﹒เงินของท่านไม่เพียงพอ ขาดอีก ({roleJSON[self.value]["price"] - userJSON[str(interaction.user.id)]["point"]})', color=nextcord.Color.red())
-        return await self.message.edit(embed=embed, view=None, content=None)
-
-    @nextcord.ui.button(
-        label='❌﹒ยกเลิก',
-        custom_id='cancel',
-        style=nextcord.ButtonStyle.red,
-        row=1
-    )
-    async def cancel(self, button: nextcord.Button, interaction: nextcord.Interaction):
-        return await self.message.edit(content='💚﹒ยกเลิกสำเร็จ',embed=None, view=None)
-
-class sellroleSelect(nextcord.ui.Select):
+class BuyView(nextcord.ui.View):
 
     def __init__(self):
-        options = []
-        roleJSON = json.load(open('./database/roles.json', 'r', encoding='utf-8'))
-        for role in roleJSON:
-            options.append(nextcord.SelectOption(
-                label=roleJSON[role]['name'],
-                description=roleJSON[role]['description'],
-                value=role,
-                emoji=roleJSON[role]['emoji']
-            ))
-        super().__init__(
-            custom_id='select-role',
-            placeholder='[ เลือกยศที่คุณต้องการซื้อ ]',
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=0
+        super().__init__(timeout=None)
+        self.link_button = nextcord.ui.Button(style=nextcord.ButtonStyle.link, label="จ้างทำบอท", url='https://discord.gg/flexzy') 
+        self.add_item(self.link_button)
+
+    @nextcord.ui.button(label='[🧧] เติมเงิน', custom_id='buyRole', style=nextcord.ButtonStyle.blurple)
+    async def buyRole(self, button: nextcord.Button, interaction: nextcord.Interaction):
+        await interaction.response.send_modal(BuyModal())
+
+    @nextcord.ui.button(label='[🛒] ราคายศทั้งหมด', custom_id='priceRole', style=nextcord.ButtonStyle.blurple)
+    async def priceRole(self, button: nextcord.Button, interaction: nextcord.Interaction):
+        description = ''
+        for roleData in config['roleSettings']:
+            description += f'เติมเงิน {roleData["price"]} บาท จะได้รับยศ\n𓆩⟡𓆪  <@&{roleData["roleId"]}>\n₊✧──────✧₊∘\n'
+        embed = nextcord.Embed(
+            title='ราคายศทั้งหมด',
+            color=nextcord.Color.from_rgb(93, 176, 242),
+            description=description
         )
-    async def callback(self, interaction: nextcord.Interaction):
-        message = await interaction.response.send_message(content='[SELECT] กำลังตรวจสอบ', ephemeral=True)
-        selected = self.values[0]
-        if ('package' in selected):
-            roleJSON = json.load(open('./database/roles.json', 'r', encoding='utf-8'))
-            embed = nextcord.Embed()
-            embed.description = f'''
-E {roleJSON[selected]['name']}**
-'''
-            await message.edit(content=None,embed=embed,view=sellroleView(message=message, value=selected))
-        else:
-            roleJSON = json.load(open('./database/roles.json', 'r', encoding='utf-8'))
-            embed = nextcord.Embed()
-            embed.title = '»»———　ยืนยันการสั่งซื้อ　——-««'
-            embed.description = f'''
-           \n คุณแน่ใจหรอที่จะซื้อ <@&{roleJSON[selected]['roleId']}> \n
-»»———　GOOD PLACE　——-««
-'''
-            embed.color = nextcord.Color.blue()
-            embed.set_thumbnail(url='https://media.discordapp.net/attachments/1248803700890144788/1261598898703568948/befa8c17-29e4-42ba-86a0-3fa1e0ebcabc.jpg?ex=66938b08&is=66923988&hm=d8688828ab4b0bbe3ff12745462ad884118e32ad78a16e3cb06add7217439f3d&=&format=webp&width=592&height=592')
-            await message.edit(content=None,embed=embed,view=sellroleView(message=message, value=selected))
-
-class setupView(nextcord.ui.View):
-
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(sellroleSelect())
-
-    @nextcord.ui.button(
-        label='🧧﹒เติมเงิน',
-        custom_id='topup',
-        style=nextcord.ButtonStyle.primary,
-        row=1
-    )
-    async def topup(self, button: nextcord.Button, interaction: nextcord.Interaction):
-        await interaction.response.send_modal(topupModal())
-
-    @nextcord.ui.button(
-        label='💳﹒เช็คเงิน',
-        custom_id='balance',
-        style=nextcord.ButtonStyle.primary,
-        row=1
-    )
-    async def balance(self, button: nextcord.Button, interaction: nextcord.Interaction):
-        userJSON = json.load(open('./database/users.json', 'r', encoding='utf-8'))
-        if (str(interaction.user.id) not in userJSON):
-            embed = nextcord.Embed(description='🏦﹒เติมเงินเพื่อเปิดบัญชี', color=nextcord.Color.red())
-        else:
-            embed = nextcord.Embed(description=f'╔═══════▣◎▣═══════╗\n\n💳﹒ยอดเงินคงเหลือ **__{userJSON[str(interaction.user.id)]["point"]}__** บาท\n\n╚═══════▣◎▣═══════╝', color=nextcord.Color.green())
-        return await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.event
 async def on_ready():
-    bot.add_view(setupView())
-    print(f'LOGIN AS {bot.user}')
+    bot.add_view(BuyView())
+    print(f"""          LOGIN AS: {bot.user}
+    Successfully reloaded application [/] commands.""")
 
-@bot.slash_command(
-    name='setup',
-    description='setup',
-    guild_ids=[config['serverId']]
-)
+@bot.slash_command(name='setup',description='setup')
 async def setup(interaction: nextcord.Interaction):
-    if (interaction.user.id not in config['ownerIds']):
-        return await interaction.response.send_message(content='[ERROR] No Permission For Use This Command.', ephemeral=True)
-    embed = nextcord.Embed()
-    embed.title = '───                    GOOD PLACE                ───'
-    embed.description = f'''
-```─────────────────────────────────────
-🧧﹒บอทซื้อยศ 24 ชั่วโมง 💚
+    if (int(interaction.user.id) == int(config['ownerId'])):
+        await interaction.channel.send(embed=nextcord.Embed(
+            title='**【⭐】Flexzy Store Topup**',
+            description='ซื้อยศอัตโนมัติ 24ชั่วโมง\n・กดปุ่ม "เติมเงิน" เพื่อซื้อยศ\n・กดปุ่ม "ราคายศ" เพื่อดูราคายศ',
+            color=nextcord.Color.from_rgb(100, 220, 255),
+        ).set_thumbnail(url='https://cdn.discordapp.com/attachments/1105860649294237846/1171859094999662693/flexzyz.png?ex=65a809d4&is=659594d4&hm=463b298fab99c869af55ddc8c6379830c00a145e161c1bcd181ac4ba975e3912&')
+        .set_image(url='https://images-ext-1.discordapp.net/external/JDnpFIEpRqs3lXwgtc6zk023mQP0KD5GDkXbRbWkAUM/https/www.checkraka.com/uploaded/img/content/130026/aungpao_truewallet_01.jpg?format=webp&width=810&height=540'), view=BuyView())
+        await interaction.response.send_message((
+        'Successfully reloaded application [/] commands.'
+        ), ephemeral=True)
+    else:
+        await interaction.response.send_message((
+           'มึงไม่ได้เป็น Owner ไอควาย ใช้ไม่ได้'
+        ), ephemeral=True)
 
-・ 💳﹒เติมเงินด้วยระบบอั่งเปา
-・ ✨﹒ระบบออโต้ 24 ชั่วโมง
-・ 💲﹒ซื้อแล้วได้ยศเลย
-・ 🔓﹒เติมเงินเพื่อเปิดบัญชี
-─────────────────────────────────────```
-'''
-    embed.color = nextcord.Color.blue()
-    embed.set_author(name="บอทซื้อยศ 24 ชั่วโมง", url="", icon_url='https://media.discordapp.net/attachments/1248803700890144788/1261598898703568948/befa8c17-29e4-42ba-86a0-3fa1e0ebcabc.jpg?ex=66938b08&is=66923988&hm=d8688828ab4b0bbe3ff12745462ad884118e32ad78a16e3cb06add7217439f3d&=&format=webp&width=592&height=592')
-    embed.add_field(name="`🟢` บอทซื้อยศ 24 ชั่วโมง `🟢`", value="```diff\n+🎐 : ซื้อยศอัตโนมัตผ่านบอท ยศทุกอย่างซื้อแล้วคุ้มค่าแน่นอน\n+🎁 : สนับสนุนร้านนี้ไม่มีผิดหวังแจกของเรื่อยๆไม่มีซึมจ้า\n```", inline=True)
-    embed.add_field(name="`🟢` วิธีการเติมงาน `🟢`", value="```diff\n+ ให้กดปุ่ม (เตืมงาน) เพื่อทำการเติมงาน\n+เติมเงินด้วยระบบอั่งเปา\n+ ระบบออโต้ 24 ชั่วโมง ```", inline=True)
-    embed.add_field(name="`❗` ข้อความจากแอดมิน `❗`", value="```diff\n- ❗ : บอทมีปัญหาโปรดแจ้งแอดมินโดยทันที\n```", inline=False)
-    embed.set_image(url="https://media.discordapp.net/attachments/1248803700890144788/1261598898703568948/befa8c17-29e4-42ba-86a0-3fa1e0ebcabc.jpg?ex=66938b08&is=66923988&hm=d8688828ab4b0bbe3ff12745462ad884118e32ad78a16e3cb06add7217439f3d&=&format=webp&width=419&height=419")
-    embed.set_image(url="https://images-ext-1.discordapp.net/external/JDnpFIEpRqs3lXwgtc6zk023mQP0KD5GDkXbRbWkAUM/https/www.checkraka.com/uploaded/img/content/130026/aungpao_truewallet_01.jpg")
-    await interaction.channel.send(embed=embed, view=setupView())
-    await interaction.response.send_message(content='[SUCCESS] Done.', ephemeral=True)
 bot.run(config['token'])
