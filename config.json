@@ -1,7 +1,21 @@
 {
-    "phoneNumber": "0979988416",
-    "serverId": 1237731291353317456,
     "token": "",
-    "ownerIds": [1061613918641995796],
-    "channelLog": 1238008990659645480
+    "phone": "",
+    "channelLog": "",
+    "ownerId": "",
+
+    "roleSettings": [
+        {
+            "roleId": "",
+            "price": 100
+        },
+        {
+            "roleId": "",
+            "price": 100
+        },
+        {
+            "roleId": "",
+            "price": 100
+        }
+    ]
 }
